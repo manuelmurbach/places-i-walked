@@ -92,6 +92,15 @@
   #data-section { margin-top: auto; }
   #data-section .top-btn { text-align: left; }
 
+  /* Nothing is editable until logged in — scratching, mode, brush size, and data actions are locked */
+  body.logged-out #controls,
+  body.logged-out .menu-row,
+  body.logged-out #data-section {
+    opacity: 0.5; pointer-events: none;
+  }
+  #locked-hint { display: none; }
+  body.logged-out #locked-hint { display: block; }
+
   /* Mobile: side panel becomes a slide-over drawer, toggled by a floating tab */
   #menu-toggle-btn {
     display: none; align-items: center; justify-content: center;
@@ -114,6 +123,23 @@
     }
     #side-menu.open { transform: translateX(0); }
   }
+
+  /* Custom confirmation modal, replaces the native browser confirm() */
+  #confirm-overlay {
+    position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,0.5);
+    display: none; align-items: center; justify-content: center;
+  }
+  #confirm-overlay.open { display: flex; }
+  #confirm-box {
+    width: 280px; max-width: 90vw; background: #fff; color: #111;
+    border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+  }
+  #confirm-box h2 { font-size: 16px; font-weight: 700; }
+  .confirm-actions { display: flex; gap: 8px; }
+  .confirm-actions .top-btn { flex: 1; }
+  #confirm-cancel { background: #e5e7eb; color: #111; }
+  #confirm-cancel:hover { background: #d1d5db; }
 
   /* Inline sign-in form, lives in the Account section of the panel */
   #auth-form { display: flex; flex-direction: column; gap: 8px; }
@@ -162,6 +188,7 @@
 
   <div class="menu-section">
     <div class="menu-label">Mode</div>
+    <p class="hint" id="locked-hint">Sign in below to start scratching.</p>
     <div id="controls">
       <button class="ctrl-btn active" id="btn-scratch" onclick="setMode('scratch')">&#9999; Scratch</button>
       <button class="ctrl-btn" id="btn-cover" onclick="setMode('cover')">&#9724; Un-scratch</button>
@@ -212,6 +239,17 @@
   </div>
 </aside>
 
+<div id="confirm-overlay">
+  <div id="confirm-box">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p class="hint" id="confirm-message"></p>
+    <div class="confirm-actions">
+      <button class="top-btn" id="confirm-cancel">Cancel</button>
+      <button class="top-btn danger" id="confirm-ok">Reset</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── Supabase config ──────────────────────────────────────────────────────────
 // Replace these two with your own project's values (Supabase dashboard → Settings → API).
@@ -247,8 +285,14 @@ let currentTab = "switzerland";
 let isScratching = false;
 let lastLatLng = null;
 let currentMode = "scratch";
+let isLoggedIn = false;
+document.body.classList.add("logged-out");
 
 function activeMap() { return currentTab === "switzerland" ? chMap : worldMap; }
+
+function updateInputGating() {
+  scratchEventDiv.style.pointerEvents = (isLoggedIn && currentMode !== "pan") ? "auto" : "none";
+}
 
 initWorldMap([]);
 initChMap([]);
@@ -293,18 +337,23 @@ sb.auth.onAuthStateChange((event, session) => {
   const signedInAs = document.getElementById("signed-in-as");
   if (session && session.user) {
     currentUserId = session.user.id;
+    isLoggedIn = true;
+    document.body.classList.remove("logged-out");
     authForm.style.display = "none";
     accountInfo.style.display = "block";
     signedInAs.textContent = "Logged in as " + session.user.email;
     loadRemoteState();
   } else {
     currentUserId = null;
+    isLoggedIn = false;
+    document.body.classList.add("logged-out");
     scratchedPoints = { world: [], switzerland: [] };
     redrawScratch();
     authForm.style.display = "block";
     accountInfo.style.display = "none";
     signedInAs.textContent = "";
   }
+  updateInputGating();
 });
 
 // ── World Map ─────────────────────────────────────────────────────────────────
@@ -502,7 +551,7 @@ function setMode(mode) {
   document.getElementById("btn-scratch").classList.toggle("active", mode === "scratch");
   document.getElementById("btn-cover").classList.toggle("active", mode === "cover");
   document.getElementById("btn-pan").classList.toggle("active", mode === "pan");
-  scratchEventDiv.style.pointerEvents = mode === "pan" ? "none" : "auto";
+  updateInputGating();
   if (mode === "pan") activeMap().dragging.enable();
   else activeMap().dragging.disable();
 }
@@ -627,8 +676,30 @@ async function loadRemoteState() {
   redrawScratch();
 }
 
-function resetScratch() {
-  if (!confirm("Reset all scratched areas for this tab?")) return;
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("confirm-overlay");
+    document.getElementById("confirm-title").textContent = title;
+    document.getElementById("confirm-message").textContent = message;
+    const okBtn = document.getElementById("confirm-ok");
+    const cancelBtn = document.getElementById("confirm-cancel");
+    overlay.classList.add("open");
+    function cleanup(result) {
+      overlay.classList.remove("open");
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      resolve(result);
+    }
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+  });
+}
+
+async function resetScratch() {
+  const ok = await showConfirm("Reset map?", "This clears all scratched areas for this tab and can't be undone.");
+  if (!ok) return;
   scratchedPoints[currentTab] = [];
   saveState();
   redrawScratch();
@@ -645,7 +716,7 @@ function switchTab(tab) {
   document.getElementById("scratch-canvas").style.display = "block";
   document.getElementById("brush-diameter").value = brushDiameterM[tab];
   scratchEventDiv.style.display = "block";
-  scratchEventDiv.style.pointerEvents = currentMode === "pan" ? "none" : "auto";
+  updateInputGating();
 
   setTimeout(() => {
     activeMap().invalidateSize();
