@@ -341,7 +341,7 @@ sb.auth.onAuthStateChange((event, session) => {
     document.body.classList.remove("logged-out");
     authForm.style.display = "none";
     accountInfo.style.display = "block";
-    signedInAs.textContent = "Logged in as " + session.user.email;
+    signedInAs.replaceChildren("Logged in as", document.createElement("br"), session.user.email);
     loadRemoteState();
   } else {
     currentUserId = null;
