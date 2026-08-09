@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Places I've Walked</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; height: 100vh; display: flex; }
+
+  #map-container { flex: 1; position: relative; overflow: hidden; }
+  .map-view { position: absolute; inset: 0; display: none; }
+  .map-view.active { display: block; }
+
+  /* Scratch canvas and event capture — siblings of the map views, cover same area */
+  #scratch-canvas {
+    position: absolute; inset: 0; z-index: 500;
+    pointer-events: none; display: none; opacity: 0.7;
+  }
+  #scratch-event-div {
+    position: absolute; inset: 0; z-index: 501;
+    pointer-events: none; cursor: crosshair; display: none;
+    background: transparent;
+  }
+
+  .ctrl-btn {
+    padding: 6px 16px; border-radius: 16px; border: 1px solid #444;
+    background: transparent; color: #ccc; cursor: pointer; font-size: 13px; transition: all 0.2s;
+  }
+  .ctrl-btn.active { background: #c8a020; border-color: #c8a020; color: #000; font-weight: 600; }
+  .ctrl-btn:hover:not(.active) { background: #333; }
+
+  /* Side panel — permanent sidebar like "visible-from", light card + green accent */
+  #side-menu {
+    width: 260px; min-width: 260px;
+    background: #fff; color: #111; border-left: 1px solid #d1d5db;
+    display: flex; flex-direction: column; padding: 16px 14px; gap: 16px;
+    overflow-y: auto; font-size: 13px;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; }
+  .brand img { width: 30px; height: 30px; display: block; flex-shrink: 0; }
+  .brand h1 { font-size: 18px; font-weight: 800; letter-spacing: -0.02em; color: #111; line-height: 1.2; }
+
+  .menu-section { display: flex; flex-direction: column; gap: 8px; }
+  .menu-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #6b7280;
+  }
+
+  /* Segmented toggles — map tab switcher and scratch-mode switcher share this look */
+  .mode-toggle, #controls {
+    display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden;
+  }
+  .mode-toggle button, #controls .ctrl-btn {
+    flex: 1; padding: 7px 4px; border: none; background: #f9fafb;
+    font-size: 12px; font-weight: 500; color: #555; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .mode-toggle button strong { display: block; font-size: 13px; }
+  .mode-toggle button.active, #controls .ctrl-btn.active { background: #16a34a; color: #fff; font-weight: 600; }
+  .mode-toggle button:hover:not(.active), #controls .ctrl-btn:hover:not(.active) { background: #f0fdf4; }
+
+  .menu-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #374151; }
+  .menu-row input {
+    width: 80px; background: #fff; border: 1px solid #d1d5db; color: #111;
+    border-radius: 5px; padding: 5px 8px; font-size: 13px;
+  }
+  .menu-row input:focus { outline: 2px solid #86efac; border-color: #86efac; }
+
+  /* Action buttons — visible-from's .btn-primary, recolored green */
+  .top-btn {
+    width: 100%; text-align: center; padding: 8px; border: none; border-radius: 6px;
+    font-size: 13px; font-weight: 600; color: #fff; background: #16a34a;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .top-btn:hover { background: #15803d; }
+
+  .rules-list {
+    list-style: disc; padding-left: 18px; display: flex; flex-direction: column;
+    gap: 6px; font-size: 12px; color: #374151; line-height: 1.4;
+  }
+  #signed-in-as { font-size: 12px; color: #111; font-weight: 600; word-break: break-all; }
+  .hint { font-size: 11px; color: #9ca3af; line-height: 1.4; }
+
+  /* Data section anchored to the bottom-left of the panel */
+  #data-section { margin-top: auto; }
+  #data-section .top-btn { text-align: left; }
+
+  /* Mobile: side panel becomes a slide-over drawer, toggled by a floating tab */
+  #menu-toggle-btn {
+    display: none; align-items: center; justify-content: center;
+    position: fixed; top: 20px; right: 0; z-index: 1700;
+    width: 24px; height: 48px; border-radius: 10px 0 0 10px; border: none;
+    background: linear-gradient(135deg, #22c55e, #15803d);
+    box-shadow: -2px 2px 8px rgba(0,0,0,0.28); cursor: pointer;
+    transition: right 0.25s ease, box-shadow 0.15s ease;
+  }
+  #menu-toggle-btn:hover { box-shadow: -2px 2px 11px rgba(0,0,0,0.38); }
+  #menu-toggle-btn svg { width: 11px; height: 11px; color: #fff; transition: transform 0.25s ease; }
+  #menu-toggle-btn.open svg { transform: rotate(180deg); }
+  #menu-toggle-btn.open { right: 260px; }
+  @media (max-width: 700px) {
+    #menu-toggle-btn { display: flex; }
+    #side-menu {
+      position: fixed; top: 0; right: 0; height: 100%; width: min(260px, 85vw); min-width: 0;
+      z-index: 1500; box-shadow: -2px 0 14px rgba(0,0,0,0.3);
+      transform: translateX(100%); transition: transform 0.25s ease;
+    }
+    #side-menu.open { transform: translateX(0); }
+  }
+
+  /* Inline sign-in form, lives in the Account section of the panel */
+  #auth-form { display: flex; flex-direction: column; gap: 8px; }
+  #auth-email {
+    padding: 7px 8px; border-radius: 5px; border: 1px solid #d1d5db;
+    background: #fff; color: #111; font-size: 13px; width: 100%;
+  }
+  #auth-email:focus { outline: 2px solid #86efac; border-color: #86efac; }
+  .remember-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #374151; }
+  #auth-send:disabled { opacity: 0.5; cursor: default; }
+  #auth-sent { display: none; color: #15803d; }
+</style>
+</head>
+<body>
+
+<button id="menu-toggle-btn" class="open" onclick="toggleMenu()" aria-label="Toggle menu">
+  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+</button>
+
+<div id="map-container">
+  <div id="world-view" class="map-view"></div>
+  <div id="ch-view" class="map-view active"></div>
+
+  <!-- These live outside Leaflet so it cannot intercept their events -->
+  <canvas id="scratch-canvas"></canvas>
+  <div id="scratch-event-div"></div>
+  <input type="file" id="import-input" accept=".json" style="display:none" onchange="handleImport(event)">
+</div>
+
+<aside id="side-menu" class="open">
+  <div class="brand">
+    <img src="favicon.svg" alt="">
+    <h1>Places I've Walked</h1>
+  </div>
+
+  <div class="mode-toggle">
+    <button id="tab-switzerland" class="active" onclick="switchTab('switzerland')">
+      <strong>Switzerland</strong> 1 km radius
+    </button>
+    <button id="tab-world" onclick="switchTab('world')">
+      <strong>World</strong> 100 km radius
+    </button>
+  </div>
+
+  <div class="menu-section">
+    <div class="menu-label">Mode</div>
+    <div id="controls">
+      <button class="ctrl-btn active" id="btn-scratch" onclick="setMode('scratch')">&#9999; Scratch</button>
+      <button class="ctrl-btn" id="btn-cover" onclick="setMode('cover')">&#9724; Un-scratch</button>
+      <button class="ctrl-btn" id="btn-pan" onclick="setMode('pan')">&#9997; Pan</button>
+    </div>
+    <div class="menu-row">
+      <span>Brush size</span>
+      <input type="number" id="brush-diameter" min="50" max="100000" step="50" onchange="onDiameterChange(this.value)">
+      <span>m</span>
+    </div>
+  </div>
+
+  <div class="menu-section">
+    <div class="menu-label">Account</div>
+
+    <div id="auth-form">
+      <div id="auth-fields">
+        <p class="hint">Sign in with your email to save your scratch map to your account.</p>
+        <input id="auth-email" type="email" placeholder="you@example.com" autocomplete="email">
+        <label class="remember-row"><input type="checkbox" id="auth-remember" checked> Keep me logged in</label>
+        <button class="top-btn" id="auth-send">Send magic link</button>
+      </div>
+      <p id="auth-sent" class="hint">Check your email for the sign-in link, then come back to this tab.</p>
+    </div>
+
+    <div id="account-info" style="display:none">
+      <div id="signed-in-as"></div>
+      <p class="hint">All changes are saved automatically.</p>
+      <button class="top-btn" id="btn-signout" onclick="signOut()">Sign out</button>
+    </div>
+  </div>
+
+  <div class="menu-section">
+    <div class="menu-label">Rules of thumb</div>
+    <ul class="rules-list">
+      <li>Scratch where you've physically been — 1&nbsp;km radius in Switzerland, 100&nbsp;km radius for World.</li>
+      <li>Driving on a highway doesn't count; normal roads do.</li>
+      <li>Public transport doesn't count.</li>
+      <li>Flying doesn't count.</li>
+    </ul>
+  </div>
+
+  <div class="menu-section" id="data-section">
+    <div class="menu-label">Data</div>
+    <button class="top-btn" onclick="resetScratch()">&#8635; Reset this tab</button>
+    <button class="top-btn" onclick="exportOverlay()">&#8593; Export backup</button>
+    <button class="top-btn" onclick="importOverlay()">&#8595; Import backup</button>
+  </div>
+</aside>
+
+<script>
+// ── Supabase config ──────────────────────────────────────────────────────────
+// Replace these two with your own project's values (Supabase dashboard → Settings → API).
+// See SETUP.md in this folder for step-by-step instructions.
+const SUPABASE_URL = "https://gminsgxcqprdfgdlwhxr.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_zEg62o3xqtJqKouE5jMY0g_GneaL2kd";
+
+const REMEMBER_KEY = "scratchMap_remember";
+function rememberMe() { return localStorage.getItem(REMEMBER_KEY) !== "0"; }
+
+// "Keep me logged in" decides whether the session token lives in localStorage
+// (survives closing the browser) or sessionStorage (cleared when the tab closes).
+const authStorage = {
+  getItem:    (k)    => (rememberMe() ? localStorage : sessionStorage).getItem(k),
+  setItem:    (k, v) => (rememberMe() ? localStorage : sessionStorage).setItem(k, v),
+  removeItem: (k)    => { localStorage.removeItem(k); sessionStorage.removeItem(k); },
+};
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storage: authStorage, persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+});
+
+let currentUserId = null;
+
+const DEFAULT_BRUSH_DIAMETER_M = { switzerland: 1000, world: 100000 };
+const SCRATCH_COLOR = "rgb(180, 50, 50)";
+
+let worldMap, chMap;
+let scratchCanvas, scratchCtx, scratchEventDiv;
+let scratchedPoints = { world: [], switzerland: [] };
+let brushDiameterM = { switzerland: DEFAULT_BRUSH_DIAMETER_M.switzerland, world: DEFAULT_BRUSH_DIAMETER_M.world };
+let currentTab = "switzerland";
+let isScratching = false;
+let lastLatLng = null;
+let currentMode = "scratch";
+
+function activeMap() { return currentTab === "switzerland" ? chMap : worldMap; }
+
+initWorldMap([]);
+initChMap([]);
+loadStateLocal();
+switchTab('switzerland');
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+document.getElementById("auth-remember").checked = rememberMe();
+
+document.getElementById("auth-send").addEventListener("click", async () => {
+  const email = document.getElementById("auth-email").value.trim();
+  if (!email) return;
+  localStorage.setItem(REMEMBER_KEY, document.getElementById("auth-remember").checked ? "1" : "0");
+  const btn = document.getElementById("auth-send");
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname }
+  });
+  btn.disabled = false;
+  btn.textContent = "Send magic link";
+  if (error) { alert("Could not send link: " + error.message); return; }
+  document.getElementById("auth-fields").style.display = "none";
+  document.getElementById("auth-sent").style.display = "block";
+});
+
+function signOut() { sb.auth.signOut(); }
+
+function toggleMenu(force) {
+  const menu = document.getElementById("side-menu");
+  const btn = document.getElementById("menu-toggle-btn");
+  const open = typeof force === "boolean" ? force : !menu.classList.contains("open");
+  menu.classList.toggle("open", open);
+  btn.classList.toggle("open", open);
+}
+
+sb.auth.onAuthStateChange((event, session) => {
+  const authForm = document.getElementById("auth-form");
+  const accountInfo = document.getElementById("account-info");
+  const signedInAs = document.getElementById("signed-in-as");
+  if (session && session.user) {
+    currentUserId = session.user.id;
+    authForm.style.display = "none";
+    accountInfo.style.display = "block";
+    signedInAs.textContent = "Logged in as " + session.user.email;
+    loadRemoteState();
+  } else {
+    currentUserId = null;
+    scratchedPoints = { world: [], switzerland: [] };
+    redrawScratch();
+    authForm.style.display = "block";
+    accountInfo.style.display = "none";
+    signedInAs.textContent = "";
+  }
+});
+
+// ── World Map ─────────────────────────────────────────────────────────────────
+
+function initWorldMap(points) {
+  worldMap = L.map("world-view", { zoomControl: true }).setView([30, 10], 2);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    attribution: "© OpenStreetMap © CARTO", maxZoom: 19
+  }).addTo(worldMap);
+
+  const renderer = L.canvas({ padding: 0.5 });
+  points.forEach(([lat, lng]) => {
+    L.circleMarker([lat, lng], {
+      renderer, radius: 2,
+      color: "#f5a623", fillColor: "#f5a623", fillOpacity: 0.6, weight: 0
+    }).addTo(worldMap);
+  });
+
+  worldMap.on("moveend zoomend", redrawScratch);
+}
+
+// ── Switzerland Map ───────────────────────────────────────────────────────────
+
+function initChMap(points) {
+  chMap = L.map("ch-view", { zoomControl: true }).setView([46.8, 8.2], 8);
+
+  L.tileLayer("https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg", {
+    attribution: "© swisstopo", maxZoom: 17, crossOrigin: true
+  }).addTo(chMap);
+
+  // Dots — on a high pane, always visible above scratch canvas
+  const dotsPane = chMap.createPane("dotsPane");
+  dotsPane.style.zIndex = 650;
+  dotsPane.style.pointerEvents = "none";
+  const dotsRenderer = L.canvas({ pane: "dotsPane", padding: 0.5 });
+  points.forEach(([lat, lng]) => {
+    L.circle([lat, lng], {
+      renderer: dotsRenderer, pane: "dotsPane",
+      radius: 150,
+      color: "#f5a623", fillColor: "#f5a623", fillOpacity: 0.7, weight: 0
+    }).addTo(chMap);
+  });
+
+  scratchCanvas = document.getElementById("scratch-canvas");
+  scratchCtx = scratchCanvas.getContext("2d");
+
+  // Event div — completely outside Leaflet DOM, no interference possible
+  scratchEventDiv = document.getElementById("scratch-event-div");
+  scratchEventDiv.addEventListener("mousedown",  onMouseDown);
+  scratchEventDiv.addEventListener("mousemove",  onMouseMove);
+  scratchEventDiv.addEventListener("mouseup",    onMouseUp);
+  scratchEventDiv.addEventListener("mouseleave", onMouseUp);
+  scratchEventDiv.addEventListener("touchstart", onTouchStart, { passive: false });
+  scratchEventDiv.addEventListener("touchmove",  onTouchMove,  { passive: false });
+  scratchEventDiv.addEventListener("touchend",   onMouseUp);
+
+  // Forward scroll wheel to Leaflet so zoom still works in scratch mode
+  scratchEventDiv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    activeMap().getContainer().dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true, cancelable: true,
+      deltaY: e.deltaY, deltaMode: e.deltaMode,
+      clientX: e.clientX, clientY: e.clientY
+    }));
+  }, { passive: false });
+
+  chMap.on("moveend zoomend", redrawScratch);
+
+  new ResizeObserver(() => resizeAndRedraw()).observe(document.getElementById("map-container"));
+}
+
+// ── Canvas ────────────────────────────────────────────────────────────────────
+
+function resizeAndRedraw() {
+  const c = document.getElementById("map-container");
+  scratchCanvas.width  = c.offsetWidth;
+  scratchCanvas.height = c.offsetHeight;
+  redrawScratch();
+}
+
+function redrawScratch() {
+  const w = scratchCanvas.width, h = scratchCanvas.height;
+  if (!w || !h) return;
+  const ctx = scratchCtx;
+
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = SCRATCH_COLOR;
+  ctx.fillRect(0, 0, w, h);
+
+  // Subtle checker texture
+  ctx.fillStyle = "rgba(0,0,0,0.08)";
+  for (let x = 0; x < w; x += 4)
+    for (let y = (x/4 % 2)*4; y < h; y += 8)
+      ctx.fillRect(x, y, 4, 4);
+
+  const r = getBrushPixels();
+
+  if (scratchedPoints[currentTab].length > 0) {
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = "rgba(0,0,0,1)";
+    scratchedPoints[currentTab].forEach(([lat, lng]) => {
+      const px = activeMap().latLngToContainerPoint([lat, lng]);
+      ctx.beginPath();
+      ctx.arc(px.x, px.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function getBrushPixels() {
+  const map = activeMap();
+  const center = map.getCenter();
+  const mpp = 40075016.686 * Math.cos(center.lat * Math.PI / 180) / Math.pow(2, map.getZoom() + 8);
+  return Math.min(200, Math.max(4, (brushDiameterM[currentTab] / 2) / mpp));
+}
+
+function onDiameterChange(val) {
+  brushDiameterM[currentTab] = Math.max(50, Number(val));
+}
+
+// ── Scratch events ────────────────────────────────────────────────────────────
+
+function eventLatLng(e) {
+  const rect = scratchCanvas.getBoundingClientRect();
+  return activeMap().containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
+}
+
+function scratchAt(latlng) {
+  const px = activeMap().latLngToContainerPoint(latlng);
+  const r  = getBrushPixels();
+  if (currentMode === "cover") {
+    scratchedPoints[currentTab] = scratchedPoints[currentTab].filter(([lat, lng]) => {
+      const p = activeMap().latLngToContainerPoint([lat, lng]);
+      return Math.hypot(p.x - px.x, p.y - px.y) > r;
+    });
+    redrawScratch();
+    return;
+  }
+  scratchedPoints[currentTab].push([latlng.lat, latlng.lng]);
+  scratchCtx.globalCompositeOperation = "destination-out";
+  scratchCtx.fillStyle = "rgba(0,0,0,1)";
+  scratchCtx.beginPath();
+  scratchCtx.arc(px.x, px.y, r, 0, Math.PI * 2);
+  scratchCtx.fill();
+  scratchCtx.globalCompositeOperation = "source-over";
+}
+
+function interpolate(from, to) {
+  const p1 = activeMap().latLngToContainerPoint(from);
+  const p2 = activeMap().latLngToContainerPoint(to);
+  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+  const steps = Math.max(1, Math.floor(dist / (getBrushPixels() * 0.4)));
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    scratchAt(L.latLng(from.lat + (to.lat - from.lat) * t, from.lng + (to.lng - from.lng) * t));
+  }
+}
+
+function onMouseDown(e) {
+  isScratching = true;
+  lastLatLng = eventLatLng(e);
+  scratchAt(lastLatLng);
+}
+function onMouseMove(e) {
+  if (!isScratching) return;
+  const curr = eventLatLng(e);
+  interpolate(lastLatLng, curr);
+  lastLatLng = curr;
+}
+function onMouseUp() {
+  if (!isScratching) return;
+  isScratching = false;
+  saveState();
+}
+function onTouchStart(e) {
+  e.preventDefault();
+  isScratching = true;
+  lastLatLng = eventLatLng(e.touches[0]);
+  scratchAt(lastLatLng);
+}
+function onTouchMove(e) {
+  e.preventDefault();
+  if (!isScratching) return;
+  const curr = eventLatLng(e.touches[0]);
+  interpolate(lastLatLng, curr);
+  lastLatLng = curr;
+}
+
+// ── Mode & tab ────────────────────────────────────────────────────────────────
+
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById("btn-scratch").classList.toggle("active", mode === "scratch");
+  document.getElementById("btn-cover").classList.toggle("active", mode === "cover");
+  document.getElementById("btn-pan").classList.toggle("active", mode === "pan");
+  scratchEventDiv.style.pointerEvents = mode === "pan" ? "none" : "auto";
+  if (mode === "pan") activeMap().dragging.enable();
+  else activeMap().dragging.disable();
+}
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+
+function overlayJSON() {
+  const named = (pts) => pts.map(([lat, lng]) => ({ lat, lng }));
+  return JSON.stringify({
+    app: "Places I've Walked",
+    format_version: 1,
+    exported_at: new Date().toISOString(),
+    notes: "Backup of your scratched areas. Each entry is the center point of one scratch stroke, in WGS84 decimal-degree lat/lng. 'switzerland' points use a 1km radius, 'world' points use 100km. Restore this exact file with the app's Import button.",
+    scratched: {
+      switzerland: named(scratchedPoints.switzerland),
+      world: named(scratchedPoints.world)
+    }
+  }, null, 2);
+}
+
+function normalizePoints(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr.map(p => Array.isArray(p) ? [p[0], p[1]] : [p.lat, p.lng]);
+}
+
+function applyOverlayData(parsed) {
+  if (Array.isArray(parsed)) {
+    scratchedPoints = { world: [], switzerland: normalizePoints(parsed) };
+  } else if (parsed.scratched) {
+    scratchedPoints = {
+      world: normalizePoints(parsed.scratched.world),
+      switzerland: normalizePoints(parsed.scratched.switzerland)
+    };
+  } else {
+    scratchedPoints = {
+      world: normalizePoints(parsed.world),
+      switzerland: normalizePoints(parsed.switzerland)
+    };
+  }
+}
+
+// ── Export / Import (manual backup, independent of the account sync) ─────────
+
+function exportOverlay() {
+  const blob = new Blob([overlayJSON()], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "scratch_overlay.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importOverlay() {
+  document.getElementById("import-input").click();
+}
+
+function handleImport(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      applyOverlayData(JSON.parse(ev.target.result));
+      saveState();
+      redrawScratch();
+    } catch(err) { alert("Invalid overlay file."); }
+  };
+  reader.readAsText(file);
+  e.target.value = "";
+}
+
+// ── Persistence: local cache + per-user Supabase sync ─────────────────────────
+
+function saveStateLocal() {
+  try {
+    localStorage.setItem("scratchMap_points", JSON.stringify(scratchedPoints));
+  } catch(e) {}
+}
+
+function loadStateLocal() {
+  try {
+    const saved = localStorage.getItem("scratchMap_points");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      scratchedPoints = { world: parsed.world || [], switzerland: parsed.switzerland || [] };
+    }
+  } catch(e) {}
+}
+
+let syncTimer = null;
+
+function saveState() {
+  saveStateLocal();
+  queueRemoteSave();
+}
+
+function queueRemoteSave() {
+  if (!currentUserId) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(async () => {
+    const { error } = await sb.from("scratches").upsert({
+      user_id: currentUserId,
+      data: scratchedPoints,
+      updated_at: new Date().toISOString()
+    });
+    if (error) console.error("Sync failed:", error.message);
+  }, 800);
+}
+
+async function loadRemoteState() {
+  const { data, error } = await sb
+    .from("scratches")
+    .select("data")
+    .eq("user_id", currentUserId)
+    .maybeSingle();
+  if (!error && data && data.data) {
+    scratchedPoints = { world: data.data.world || [], switzerland: data.data.switzerland || [] };
+  } else {
+    scratchedPoints = { world: [], switzerland: [] };
+  }
+  saveStateLocal();
+  redrawScratch();
+}
+
+function resetScratch() {
+  if (!confirm("Reset all scratched areas for this tab?")) return;
+  scratchedPoints[currentTab] = [];
+  saveState();
+  redrawScratch();
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById("tab-switzerland").classList.toggle("active", tab === "switzerland");
+  document.getElementById("tab-world").classList.toggle("active", tab === "world");
+  document.getElementById("world-view").classList.toggle("active", tab === "world");
+  document.getElementById("ch-view").classList.toggle("active",    tab === "switzerland");
+
+  document.getElementById("controls").style.display = "flex";
+  document.getElementById("scratch-canvas").style.display = "block";
+  document.getElementById("brush-diameter").value = brushDiameterM[tab];
+  scratchEventDiv.style.display = "block";
+  scratchEventDiv.style.pointerEvents = currentMode === "pan" ? "none" : "auto";
+
+  setTimeout(() => {
+    activeMap().invalidateSize();
+    resizeAndRedraw();
+  }, 50);
+}
+</script>
+</body>
+</html>
