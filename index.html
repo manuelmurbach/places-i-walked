@@ -16,6 +16,13 @@
   .map-view { position: absolute; inset: 0; display: none; }
   .map-view.active { display: block; }
 
+  .locate-btn {
+    width: 30px; height: 30px; line-height: 30px; display: block;
+    background: #fff; text-align: center; font-size: 17px; color: #333;
+    text-decoration: none;
+  }
+  .locate-btn:hover { background: #f4f4f4; }
+
   /* Scratch canvas and event capture — siblings of the map views, cover same area */
   #scratch-canvas {
     position: absolute; inset: 0; z-index: 500;
@@ -425,6 +432,7 @@ function initWorldMap(points) {
   });
 
   worldMap.on("moveend zoomend", redrawScratch);
+  addLocateControl(worldMap);
 }
 
 // ── Switzerland Map ───────────────────────────────────────────────────────────
@@ -481,8 +489,55 @@ function initChMap(points) {
   }, { passive: false });
 
   chMap.on("moveend zoomend", redrawScratch);
+  addLocateControl(chMap);
 
   new ResizeObserver(() => resizeAndRedraw()).observe(document.getElementById("map-container"));
+}
+
+// ── Locate me ─────────────────────────────────────────────────────────────────
+
+function addLocateControl(map) {
+  const control = L.control({ position: "topleft" });
+  control.onAdd = function() {
+    const container = L.DomUtil.create("div", "leaflet-bar leaflet-control");
+    const link = L.DomUtil.create("a", "locate-btn", container);
+    link.href = "#";
+    link.title = "Go to current location";
+    link.innerHTML = "&#8982;";
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(link, "click", L.DomEvent.stop).on(link, "click", locateMe);
+    return container;
+  };
+  control.addTo(map);
+}
+
+let locateMarker = null;
+
+function locateMe() {
+  if (!navigator.geolocation) {
+    alert("Geolocation isn't available in this browser.");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      const map = activeMap();
+      map.setView([latitude, longitude], currentTab === "switzerland" ? 14 : 8, { animate: true });
+      if (locateMarker) {
+        locateMarker.map.removeLayer(locateMarker.dot);
+        locateMarker.map.removeLayer(locateMarker.circle);
+      }
+      const dot = L.circleMarker([latitude, longitude], {
+        radius: 6, color: "#166534", fillColor: "#22c55e", fillOpacity: 1, weight: 2
+      }).addTo(map);
+      const circle = L.circle([latitude, longitude], {
+        radius: accuracy, color: "#22c55e", fillColor: "#22c55e", fillOpacity: 0.12, weight: 1
+      }).addTo(map);
+      locateMarker = { map, dot, circle };
+    },
+    (err) => { alert("Couldn't get your location: " + err.message); },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
