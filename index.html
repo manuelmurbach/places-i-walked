@@ -78,6 +78,8 @@
     cursor: pointer; transition: background 0.15s;
   }
   .top-btn:hover { background: #15803d; }
+  .top-btn.danger { background: #dc2626; }
+  .top-btn.danger:hover { background: #b91c1c; }
 
   .rules-list {
     list-style: disc; padding-left: 18px; display: flex; flex-direction: column;
@@ -204,7 +206,7 @@
 
   <div class="menu-section" id="data-section">
     <div class="menu-label">Data</div>
-    <button class="top-btn" onclick="resetScratch()">&#8635; Reset this tab</button>
+    <button class="top-btn danger" onclick="resetScratch()">&#8635; Reset Map</button>
     <button class="top-btn" onclick="exportOverlay()">&#8593; Export backup</button>
     <button class="top-btn" onclick="importOverlay()">&#8595; Import backup</button>
   </div>
