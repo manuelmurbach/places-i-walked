@@ -27,6 +27,24 @@
     background: transparent;
   }
 
+  #map-loading {
+    position: absolute; inset: 0; z-index: 900;
+    background: rgba(26,26,26,0.85);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #map-loading.hidden { display: none; }
+  #map-loading-box { width: 200px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+  #map-loading-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px; overflow: hidden; }
+  #map-loading-fill {
+    height: 100%; width: 40%; background: #c8a020; border-radius: 3px;
+    animation: map-loading-slide 1.1s ease-in-out infinite;
+  }
+  @keyframes map-loading-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+  #map-loading-box p { color: #ddd; font-size: 13px; }
+
   .ctrl-btn {
     padding: 6px 16px; border-radius: 16px; border: 1px solid #444;
     background: transparent; color: #ccc; cursor: pointer; font-size: 13px; transition: all 0.2s;
@@ -169,6 +187,13 @@
   <canvas id="scratch-canvas"></canvas>
   <div id="scratch-event-div"></div>
   <input type="file" id="import-input" accept=".json" style="display:none" onchange="handleImport(event)">
+
+  <div id="map-loading">
+    <div id="map-loading-box">
+      <div id="map-loading-bar"><div id="map-loading-fill"></div></div>
+      <p>Loading your map…</p>
+    </div>
+  </div>
 </div>
 
 <aside id="side-menu" class="open">
@@ -192,12 +217,6 @@
     <div id="controls">
       <button class="ctrl-btn active" id="btn-scratch" onclick="setMode('scratch')">&#9999; Scratch</button>
       <button class="ctrl-btn" id="btn-cover" onclick="setMode('cover')">&#9724; Un-scratch</button>
-      <button class="ctrl-btn" id="btn-pan" onclick="setMode('pan')">&#9997; Pan</button>
-    </div>
-    <div class="menu-row">
-      <span>Brush size</span>
-      <input type="number" id="brush-diameter" min="50" max="100000" step="50" onchange="onDiameterChange(this.value)">
-      <span>m</span>
     </div>
   </div>
 
@@ -216,7 +235,7 @@
 
     <div id="account-info" style="display:none">
       <div id="signed-in-as"></div>
-      <p class="hint">All changes are saved automatically.</p>
+      <p class="hint" id="save-status">All changes are saved automatically.</p>
       <button class="top-btn" id="btn-signout" onclick="signOut()">Sign out</button>
     </div>
   </div>
@@ -274,13 +293,12 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 let currentUserId = null;
 
-const DEFAULT_BRUSH_DIAMETER_M = { switzerland: 1000, world: 100000 };
+const BRUSH_DIAMETER_M = { switzerland: 1000, world: 100000 };
 const SCRATCH_COLOR = "rgb(180, 50, 50)";
 
 let worldMap, chMap;
 let scratchCanvas, scratchCtx, scratchEventDiv;
 let scratchedPoints = { world: [], switzerland: [] };
-let brushDiameterM = { switzerland: DEFAULT_BRUSH_DIAMETER_M.switzerland, world: DEFAULT_BRUSH_DIAMETER_M.world };
 let currentTab = "switzerland";
 let isScratching = false;
 let lastLatLng = null;
@@ -291,8 +309,14 @@ document.body.classList.add("logged-out");
 function activeMap() { return currentTab === "switzerland" ? chMap : worldMap; }
 
 function updateInputGating() {
-  scratchEventDiv.style.pointerEvents = (isLoggedIn && currentMode !== "pan") ? "auto" : "none";
+  scratchEventDiv.style.pointerEvents = isLoggedIn ? "auto" : "none";
 }
+
+function hideMapLoading() {
+  document.getElementById("map-loading").classList.add("hidden");
+}
+// Safety net in case auth never resolves for some reason
+setTimeout(hideMapLoading, 8000);
 
 initWorldMap([]);
 initChMap([]);
@@ -352,6 +376,7 @@ sb.auth.onAuthStateChange((event, session) => {
     authForm.style.display = "block";
     accountInfo.style.display = "none";
     signedInAs.textContent = "";
+    hideMapLoading();
   }
   updateInputGating();
 });
@@ -359,7 +384,7 @@ sb.auth.onAuthStateChange((event, session) => {
 // ── World Map ─────────────────────────────────────────────────────────────────
 
 function initWorldMap(points) {
-  worldMap = L.map("world-view", { zoomControl: true }).setView([30, 10], 2);
+  worldMap = L.map("world-view", { zoomControl: true, zoomSnap: 0.25, zoomDelta: 1, dragging: false }).setView([30, 10], 2);
   L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
     attribution: "© OpenStreetMap © CARTO", maxZoom: 19
   }).addTo(worldMap);
@@ -378,7 +403,7 @@ function initWorldMap(points) {
 // ── Switzerland Map ───────────────────────────────────────────────────────────
 
 function initChMap(points) {
-  chMap = L.map("ch-view", { zoomControl: true }).setView([46.8, 8.2], 8);
+  chMap = L.map("ch-view", { zoomControl: true, zoomSnap: 0.25, zoomDelta: 1, dragging: false }).setView([46.8, 8.2], 8);
 
   L.tileLayer("https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg", {
     attribution: "© swisstopo", maxZoom: 17, crossOrigin: true
@@ -408,16 +433,21 @@ function initChMap(points) {
   scratchEventDiv.addEventListener("mouseleave", onMouseUp);
   scratchEventDiv.addEventListener("touchstart", onTouchStart, { passive: false });
   scratchEventDiv.addEventListener("touchmove",  onTouchMove,  { passive: false });
-  scratchEventDiv.addEventListener("touchend",   onMouseUp);
+  scratchEventDiv.addEventListener("touchend",   onTouchEnd);
+  scratchEventDiv.addEventListener("touchcancel", onTouchEnd);
 
-  // Forward scroll wheel to Leaflet so zoom still works in scratch mode
+  // Trackpad: plain two-finger scroll pans, pinch (reported by browsers as
+  // ctrl+wheel) zooms. One-finger/mouse-drag is reserved for scratching.
   scratchEventDiv.addEventListener("wheel", (e) => {
     e.preventDefault();
-    activeMap().getContainer().dispatchEvent(new WheelEvent("wheel", {
-      bubbles: true, cancelable: true,
-      deltaY: e.deltaY, deltaMode: e.deltaMode,
-      clientX: e.clientX, clientY: e.clientY
-    }));
+    const map = activeMap();
+    if (e.ctrlKey) {
+      const rect = scratchCanvas.getBoundingClientRect();
+      const latlng = map.containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
+      map.setZoomAround(latlng, map.getZoom() - e.deltaY * 0.01, { animate: false });
+    } else {
+      map.panBy([e.deltaX, e.deltaY], { animate: false });
+    }
   }, { passive: false });
 
   chMap.on("moveend zoomend", redrawScratch);
@@ -469,11 +499,7 @@ function getBrushPixels() {
   const map = activeMap();
   const center = map.getCenter();
   const mpp = 40075016.686 * Math.cos(center.lat * Math.PI / 180) / Math.pow(2, map.getZoom() + 8);
-  return Math.min(200, Math.max(4, (brushDiameterM[currentTab] / 2) / mpp));
-}
-
-function onDiameterChange(val) {
-  brushDiameterM[currentTab] = Math.max(50, Number(val));
+  return Math.min(200, Math.max(4, (BRUSH_DIAMETER_M[currentTab] / 2) / mpp));
 }
 
 // ── Scratch events ────────────────────────────────────────────────────────────
@@ -530,18 +556,58 @@ function onMouseUp() {
   isScratching = false;
   saveState();
 }
+// Two-finger touch geometry (midpoint + spread) used to drive pan + pinch-zoom.
+let touchGesture = null;
+
+function touchGeometry(touches) {
+  const rect = scratchCanvas.getBoundingClientRect();
+  const p0 = { x: touches[0].clientX - rect.left, y: touches[0].clientY - rect.top };
+  const p1 = { x: touches[1].clientX - rect.left, y: touches[1].clientY - rect.top };
+  const mid = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+  return { mid, dist: Math.hypot(p1.x - p0.x, p1.y - p0.y) };
+}
+
 function onTouchStart(e) {
   e.preventDefault();
-  isScratching = true;
-  lastLatLng = eventLatLng(e.touches[0]);
-  scratchAt(lastLatLng);
+  if (e.touches.length === 1) {
+    touchGesture = null;
+    isScratching = true;
+    lastLatLng = eventLatLng(e.touches[0]);
+    scratchAt(lastLatLng);
+  } else if (e.touches.length === 2) {
+    isScratching = false;
+    touchGesture = touchGeometry(e.touches);
+  }
 }
 function onTouchMove(e) {
   e.preventDefault();
-  if (!isScratching) return;
-  const curr = eventLatLng(e.touches[0]);
-  interpolate(lastLatLng, curr);
-  lastLatLng = curr;
+  if (e.touches.length === 1 && isScratching) {
+    const curr = eventLatLng(e.touches[0]);
+    interpolate(lastLatLng, curr);
+    lastLatLng = curr;
+  } else if (e.touches.length === 2 && touchGesture) {
+    const map = activeMap();
+    const geo = touchGeometry(e.touches);
+    const dx = geo.mid.x - touchGesture.mid.x;
+    const dy = geo.mid.y - touchGesture.mid.y;
+    if (dx || dy) map.panBy([-dx, -dy], { animate: false });
+    const scale = geo.dist / touchGesture.dist;
+    if (isFinite(scale) && scale > 0 && scale !== 1) {
+      const latlng = map.containerPointToLatLng([geo.mid.x, geo.mid.y]);
+      map.setZoomAround(latlng, map.getZoom() + Math.log2(scale), { animate: false });
+    }
+    touchGesture = touchGeometry(e.touches);
+  }
+}
+function onTouchEnd(e) {
+  if (e.touches.length === 0) {
+    onMouseUp();
+    touchGesture = null;
+  } else if (e.touches.length === 1) {
+    // Dropped from two fingers to one — require a fresh lift before scratching again.
+    touchGesture = null;
+    isScratching = false;
+  }
 }
 
 // ── Mode & tab ────────────────────────────────────────────────────────────────
@@ -550,10 +616,7 @@ function setMode(mode) {
   currentMode = mode;
   document.getElementById("btn-scratch").classList.toggle("active", mode === "scratch");
   document.getElementById("btn-cover").classList.toggle("active", mode === "cover");
-  document.getElementById("btn-pan").classList.toggle("active", mode === "pan");
   updateInputGating();
-  if (mode === "pan") activeMap().dragging.enable();
-  else activeMap().dragging.disable();
 }
 
 // ── Data helpers ──────────────────────────────────────────────────────────────
@@ -642,6 +705,28 @@ function loadStateLocal() {
 }
 
 let syncTimer = null;
+let saveStatusResetTimer = null;
+const SAVE_STATUS_DEFAULT = "All changes are saved automatically.";
+
+function setSaveStatus(state) {
+  const el = document.getElementById("save-status");
+  if (!el) return;
+  clearTimeout(saveStatusResetTimer);
+  if (state === "saving") {
+    el.textContent = "Saving…";
+    el.style.color = "#9ca3af";
+  } else if (state === "saved") {
+    el.textContent = "✓ Saved";
+    el.style.color = "#15803d";
+    saveStatusResetTimer = setTimeout(() => {
+      el.textContent = SAVE_STATUS_DEFAULT;
+      el.style.color = "";
+    }, 2000);
+  } else if (state === "error") {
+    el.textContent = "⚠ Couldn't save — will retry on next change";
+    el.style.color = "#dc2626";
+  }
+}
 
 function saveState() {
   saveStateLocal();
@@ -651,13 +736,19 @@ function saveState() {
 function queueRemoteSave() {
   if (!currentUserId) return;
   clearTimeout(syncTimer);
+  setSaveStatus("saving");
   syncTimer = setTimeout(async () => {
     const { error } = await sb.from("scratches").upsert({
       user_id: currentUserId,
       data: scratchedPoints,
       updated_at: new Date().toISOString()
     });
-    if (error) console.error("Sync failed:", error.message);
+    if (error) {
+      console.error("Sync failed:", error.message);
+      setSaveStatus("error");
+    } else {
+      setSaveStatus("saved");
+    }
   }, 800);
 }
 
@@ -674,6 +765,7 @@ async function loadRemoteState() {
   }
   saveStateLocal();
   redrawScratch();
+  hideMapLoading();
 }
 
 function showConfirm(title, message) {
@@ -714,7 +806,6 @@ function switchTab(tab) {
 
   document.getElementById("controls").style.display = "flex";
   document.getElementById("scratch-canvas").style.display = "block";
-  document.getElementById("brush-diameter").value = brushDiameterM[tab];
   scratchEventDiv.style.display = "block";
   updateInputGating();
 
