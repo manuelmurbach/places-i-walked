@@ -299,6 +299,27 @@ const SCRATCH_COLOR = "rgb(180, 50, 50)";
 let worldMap, chMap;
 let scratchCanvas, scratchCtx, scratchEventDiv;
 let scratchedPoints = { world: [], switzerland: [] };
+
+// A spatial index of occupied grid cells per tab, used to skip storing a new
+// point when one already exists nearby (its circle already covers the area).
+// Cell size = brush radius, which guarantees any two same-cell points overlap.
+let scratchGrid = { world: new Set(), switzerland: new Set() };
+
+function cellKeyFor(tab, lat, lng) {
+  const size = BRUSH_DIAMETER_M[tab] / 2;
+  const latCell = size / 111320;
+  const lngCell = size / (111320 * Math.cos(lat * Math.PI / 180));
+  return Math.round(lat / latCell) + "," + Math.round(lng / lngCell);
+}
+
+function rebuildGrids() {
+  for (const tab of ["switzerland", "world"]) {
+    const set = new Set();
+    for (const [lat, lng] of scratchedPoints[tab]) set.add(cellKeyFor(tab, lat, lng));
+    scratchGrid[tab] = set;
+  }
+}
+
 let currentTab = "switzerland";
 let isScratching = false;
 let lastLatLng = null;
@@ -372,6 +393,7 @@ sb.auth.onAuthStateChange((event, session) => {
     isLoggedIn = false;
     document.body.classList.add("logged-out");
     scratchedPoints = { world: [], switzerland: [] };
+    rebuildGrids();
     redrawScratch();
     authForm.style.display = "block";
     accountInfo.style.display = "none";
@@ -441,11 +463,14 @@ function initChMap(points) {
   scratchEventDiv.addEventListener("wheel", (e) => {
     e.preventDefault();
     const map = activeMap();
-    if (e.ctrlKey) {
-      const rect = scratchCanvas.getBoundingClientRect();
-      const latlng = map.containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
-      map.setZoomAround(latlng, map.getZoom() - e.deltaY * 0.01, { animate: false });
+    const rect = scratchCanvas.getBoundingClientRect();
+    const latlng = map.containerPointToLatLng([e.clientX - rect.left, e.clientY - rect.top]);
+    if (e.ctrlKey || classifyWheel(e) === "wheel") {
+      // Trackpad pinch (ctrlKey) or an actual mouse wheel notch: zoom.
+      const value = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+      map.setZoomAround(latlng, map.getZoom() - value * 0.01, { animate: false });
     } else {
+      // Trackpad two-finger scroll: pan.
       map.panBy([e.deltaX, e.deltaY], { animate: false });
     }
   }, { passive: false });
@@ -517,16 +542,24 @@ function scratchAt(latlng) {
       const p = activeMap().latLngToContainerPoint([lat, lng]);
       return Math.hypot(p.x - px.x, p.y - px.y) > r;
     });
+    rebuildGrids();
     redrawScratch();
     return;
   }
-  scratchedPoints[currentTab].push([latlng.lat, latlng.lng]);
   scratchCtx.globalCompositeOperation = "destination-out";
   scratchCtx.fillStyle = "rgba(0,0,0,1)";
   scratchCtx.beginPath();
   scratchCtx.arc(px.x, px.y, r, 0, Math.PI * 2);
   scratchCtx.fill();
   scratchCtx.globalCompositeOperation = "source-over";
+
+  // Only store the point if this area isn't already covered — keeps the
+  // saved data from growing unbounded as the same roads get re-scratched.
+  const key = cellKeyFor(currentTab, latlng.lat, latlng.lng);
+  if (!scratchGrid[currentTab].has(key)) {
+    scratchGrid[currentTab].add(key);
+    scratchedPoints[currentTab].push([latlng.lat, latlng.lng]);
+  }
 }
 
 function interpolate(from, to) {
@@ -556,6 +589,32 @@ function onMouseUp() {
   isScratching = false;
   saveState();
 }
+// Distinguish a physical mouse wheel from trackpad scrolling on plain (non-ctrl)
+// wheel events — same heuristic Mapbox GL's scroll-zoom handler uses, since
+// browsers don't otherwise expose which device produced a wheel event.
+let wheelInputType = null;
+let wheelLastTime = 0;
+let wheelLastValue = 0;
+
+function classifyWheel(e) {
+  const value = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+  const now = performance.now();
+  const timeDelta = now - wheelLastTime;
+  wheelLastTime = now;
+
+  if (value !== 0 && value % 4.000244140625 === 0) {
+    wheelInputType = "wheel";
+  } else if (value !== 0 && Math.abs(value) < 4) {
+    wheelInputType = "trackpad";
+  } else if (timeDelta > 400) {
+    wheelInputType = null;
+    wheelLastValue = value;
+  } else if (!wheelInputType) {
+    wheelInputType = Math.abs(timeDelta * value) < 200 ? "trackpad" : "wheel";
+  }
+  return wheelInputType || "wheel";
+}
+
 // Two-finger touch geometry (midpoint + spread) used to drive pan + pinch-zoom.
 let touchGesture = null;
 
@@ -654,6 +713,7 @@ function applyOverlayData(parsed) {
       switzerland: normalizePoints(parsed.switzerland)
     };
   }
+  rebuildGrids();
 }
 
 // ── Export / Import (manual backup, independent of the account sync) ─────────
@@ -702,6 +762,7 @@ function loadStateLocal() {
       scratchedPoints = { world: parsed.world || [], switzerland: parsed.switzerland || [] };
     }
   } catch(e) {}
+  rebuildGrids();
 }
 
 let syncTimer = null;
@@ -763,6 +824,7 @@ async function loadRemoteState() {
   } else {
     scratchedPoints = { world: [], switzerland: [] };
   }
+  rebuildGrids();
   saveStateLocal();
   redrawScratch();
   hideMapLoading();
