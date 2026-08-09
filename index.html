@@ -98,6 +98,9 @@
   .top-btn:hover { background: #15803d; }
   .top-btn.danger { background: #dc2626; }
   .top-btn.danger:hover { background: #b91c1c; }
+  .top-btn.small { padding: 5px; font-size: 11px; font-weight: 500; }
+
+  #data-buttons { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
 
   .rules-list {
     list-style: disc; padding-left: 18px; display: flex; flex-direction: column;
@@ -106,9 +109,8 @@
   #signed-in-as { font-size: 12px; color: #111; font-weight: 600; word-break: break-all; }
   .hint { font-size: 11px; color: #9ca3af; line-height: 1.4; }
 
-  /* Data section anchored to the bottom-left of the panel */
-  #data-section { margin-top: auto; }
-  #data-section .top-btn { text-align: left; }
+  /* Rules of thumb is the last section — anchor it to the bottom of the panel */
+  #side-menu > .menu-section:last-child { margin-top: auto; }
 
   /* Nothing is editable until logged in — scratching, mode, brush size, and data actions are locked */
   body.logged-out #controls,
@@ -235,8 +237,18 @@
 
     <div id="account-info" style="display:none">
       <div id="signed-in-as"></div>
-      <p class="hint" id="save-status">All changes are saved automatically.</p>
       <button class="top-btn" id="btn-signout" onclick="signOut()">Sign out</button>
+    </div>
+  </div>
+
+  <div class="menu-section" id="data-section">
+    <div class="menu-label">Data</div>
+    <p class="hint" id="save-status">Changes are saved automatically (10s).</p>
+    <button class="top-btn" onclick="saveNow()">Save now</button>
+    <div id="data-buttons">
+      <button class="top-btn danger small" onclick="resetScratch()">&#8635; Reset Map</button>
+      <button class="top-btn small" onclick="exportOverlay()">&#8593; Export backup</button>
+      <button class="top-btn small" onclick="importOverlay()">&#8595; Import backup</button>
     </div>
   </div>
 
@@ -248,13 +260,6 @@
       <li>Public transport doesn't count.</li>
       <li>Flying doesn't count.</li>
     </ul>
-  </div>
-
-  <div class="menu-section" id="data-section">
-    <div class="menu-label">Data</div>
-    <button class="top-btn danger" onclick="resetScratch()">&#8635; Reset Map</button>
-    <button class="top-btn" onclick="exportOverlay()">&#8593; Export backup</button>
-    <button class="top-btn" onclick="importOverlay()">&#8595; Import backup</button>
   </div>
 </aside>
 
@@ -765,9 +770,11 @@ function loadStateLocal() {
   rebuildGrids();
 }
 
-let syncTimer = null;
+const SAVE_INTERVAL_MS = 10000;
 let saveStatusResetTimer = null;
-const SAVE_STATUS_DEFAULT = "All changes are saved automatically.";
+let isDirty = false;
+let isSaving = false;
+const SAVE_STATUS_DEFAULT = "Changes are saved automatically (10s).";
 
 function setSaveStatus(state) {
   const el = document.getElementById("save-status");
@@ -784,34 +791,45 @@ function setSaveStatus(state) {
       el.style.color = "";
     }, 2000);
   } else if (state === "error") {
-    el.textContent = "⚠ Couldn't save — will retry on next change";
+    el.textContent = "⚠ Couldn't save — will retry";
     el.style.color = "#dc2626";
   }
 }
 
+// Marks scratch data as changed; the 10s interval loop below picks it up.
+// Deliberately not a debounce — during active scratching this caps writes
+// to at most one every 10s instead of one per stroke.
 function saveState() {
   saveStateLocal();
-  queueRemoteSave();
+  isDirty = true;
 }
 
-function queueRemoteSave() {
-  if (!currentUserId) return;
-  clearTimeout(syncTimer);
+async function performSave() {
+  if (!currentUserId || !isDirty || isSaving) return;
+  isDirty = false;
+  isSaving = true;
   setSaveStatus("saving");
-  syncTimer = setTimeout(async () => {
-    const { error } = await sb.from("scratches").upsert({
-      user_id: currentUserId,
-      data: scratchedPoints,
-      updated_at: new Date().toISOString()
-    });
-    if (error) {
-      console.error("Sync failed:", error.message);
-      setSaveStatus("error");
-    } else {
-      setSaveStatus("saved");
-    }
-  }, 800);
+  const { error } = await sb.from("scratches").upsert({
+    user_id: currentUserId,
+    data: scratchedPoints,
+    updated_at: new Date().toISOString()
+  });
+  isSaving = false;
+  if (error) {
+    console.error("Sync failed:", error.message);
+    setSaveStatus("error");
+    isDirty = true; // retry on the next tick
+  } else {
+    setSaveStatus("saved");
+  }
 }
+
+async function saveNow() {
+  isDirty = true;
+  await performSave();
+}
+
+setInterval(performSave, SAVE_INTERVAL_MS);
 
 async function loadRemoteState() {
   const { data, error } = await sb
