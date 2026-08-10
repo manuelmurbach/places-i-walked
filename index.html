@@ -305,7 +305,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 let currentUserId = null;
 
-const BRUSH_DIAMETER_M = { switzerland: 1000, world: 100000 };
+const BRUSH_RADIUS_M = { switzerland: 1000, world: 100000 };
 const SCRATCH_COLOR = "rgb(180, 50, 50)";
 
 let worldMap, chMap;
@@ -318,7 +318,7 @@ let scratchedPoints = { world: [], switzerland: [] };
 let scratchGrid = { world: new Set(), switzerland: new Set() };
 
 function cellKeyFor(tab, lat, lng) {
-  const size = BRUSH_DIAMETER_M[tab] / 2;
+  const size = BRUSH_RADIUS_M[tab];
   const latCell = size / 111320;
   const lngCell = size / (111320 * Math.cos(lat * Math.PI / 180));
   return Math.round(lat / latCell) + "," + Math.round(lng / lngCell);
@@ -584,7 +584,7 @@ function getBrushPixels() {
   const map = activeMap();
   const center = map.getCenter();
   const mpp = 40075016.686 * Math.cos(center.lat * Math.PI / 180) / Math.pow(2, map.getZoom() + 8);
-  return Math.min(200, Math.max(4, (BRUSH_DIAMETER_M[currentTab] / 2) / mpp));
+  return Math.min(2500, Math.max(4, BRUSH_RADIUS_M[currentTab] / mpp));
 }
 
 // ── Scratch events ────────────────────────────────────────────────────────────
