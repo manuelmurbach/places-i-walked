@@ -33,6 +33,14 @@
     pointer-events: none; cursor: crosshair; display: none;
     background: transparent;
   }
+  /* Pins live above the scratch canvas (z:500) as plain DOM, not Leaflet
+     markers — Leaflet's panes paint underneath our explicit z-index layers,
+     which would otherwise tint pins with the scratch overlay's red. */
+  #pins-layer {
+    position: absolute; inset: 0; z-index: 502;
+    pointer-events: none; overflow: hidden;
+  }
+  .pin-icon { position: absolute; width: 26px; height: 34px; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.4)); }
 
   #map-loading {
     position: absolute; inset: 0; z-index: 900;
@@ -77,17 +85,37 @@
   }
 
   /* Segmented toggles — map tab switcher and scratch-mode switcher share this look */
-  .mode-toggle, #controls {
+  .mode-toggle, .seg-controls {
     display: flex; border: 1px solid #d1d5db; border-radius: 7px; overflow: hidden;
   }
-  .mode-toggle button, #controls .ctrl-btn {
+  .mode-toggle button, .seg-controls .ctrl-btn {
     flex: 1; padding: 7px 4px; border: none; background: #f9fafb;
     font-size: 12px; font-weight: 500; color: #555; cursor: pointer;
     transition: background 0.15s, color 0.15s;
   }
   .mode-toggle button strong { display: block; font-size: 13px; }
-  .mode-toggle button.active, #controls .ctrl-btn.active { background: #16a34a; color: #fff; font-weight: 600; }
-  .mode-toggle button:hover:not(.active), #controls .ctrl-btn:hover:not(.active) { background: #f0fdf4; }
+  .mode-toggle button.active, .seg-controls .ctrl-btn.active { background: #16a34a; color: #fff; font-weight: 600; }
+  .mode-toggle button:hover:not(.active), .seg-controls .ctrl-btn:hover:not(.active) { background: #f0fdf4; }
+
+  .poi-toggle-btn {
+    width: 100%; padding: 7px 4px; border-radius: 7px; border: 1px solid #d1d5db;
+    background: #f9fafb; font-size: 12px; font-weight: 500; color: #555; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .poi-toggle-btn.active { background: #16a34a; border-color: #16a34a; color: #fff; font-weight: 600; }
+  .poi-toggle-btn:hover:not(.active) { background: #f0fdf4; }
+
+  .poi-kind-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+  .kind-btn {
+    padding: 7px 4px; border-radius: 6px; border: 1px solid #d1d5db;
+    background: #f9fafb; font-size: 12px; font-weight: 500; color: #555; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .kind-btn:hover:not(.active) { background: #f0fdf4; }
+  .kind-btn.active[data-kind="fourk"]    { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; }
+  .kind-btn.active[data-kind="threek"]   { background: #16a34a; border-color: #16a34a; color: #fff; font-weight: 600; }
+  .kind-btn.active[data-kind="special"]  { background: #c8a020; border-color: #c8a020; color: #000; font-weight: 600; }
+  .kind-btn.active[data-kind="wishlist"] { background: #dc2626; border-color: #dc2626; color: #fff; font-weight: 600; }
 
   .menu-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #374151; }
   .menu-row input {
@@ -121,6 +149,7 @@
 
   /* Nothing is editable until logged in — scratching, mode, brush size, and data actions are locked */
   body.logged-out #controls,
+  body.logged-out #poi-controls,
   body.logged-out .menu-row,
   body.logged-out #data-section {
     opacity: 0.5; pointer-events: none;
@@ -195,6 +224,7 @@
   <!-- These live outside Leaflet so it cannot intercept their events -->
   <canvas id="scratch-canvas"></canvas>
   <div id="scratch-event-div"></div>
+  <div id="pins-layer"></div>
   <input type="file" id="import-input" accept=".json" style="display:none" onchange="handleImport(event)">
 
   <div id="map-loading">
@@ -223,9 +253,18 @@
   <div class="menu-section">
     <div class="menu-label">Mode</div>
     <p class="hint" id="locked-hint">Sign in below to start scratching.</p>
-    <div id="controls">
+    <div id="controls" class="seg-controls">
       <button class="ctrl-btn active" id="btn-scratch" onclick="setMode('scratch')">&#9999; Scratch</button>
       <button class="ctrl-btn" id="btn-cover" onclick="setMode('cover')">&#9724; Un-scratch</button>
+    </div>
+    <div id="poi-controls">
+      <button class="poi-toggle-btn" id="btn-poi" onclick="setMode('poi')">&#128205; Points of Interest</button>
+      <div id="poi-kinds" class="poi-kind-grid" style="display:none;">
+        <button class="kind-btn active" id="kind-fourk" data-kind="fourk" onclick="setPoiKind('fourk')">4000er</button>
+        <button class="kind-btn" id="kind-threek" data-kind="threek" onclick="setPoiKind('threek')">3000er</button>
+        <button class="kind-btn" id="kind-special" data-kind="special" onclick="setPoiKind('special')">Special</button>
+        <button class="kind-btn" id="kind-wishlist" data-kind="wishlist" onclick="setPoiKind('wishlist')">Want to go</button>
+      </div>
     </div>
   </div>
 
@@ -332,6 +371,99 @@ function rebuildGrids() {
   }
 }
 
+// ── Pins: "Points of Interest", one of four colored kinds ─────────────────────
+// Stored as plain [lat, lng] pairs per kind, synced alongside scratchedPoints
+// in the same Supabase row and localStorage entry.
+
+const POI_KINDS = {
+  fourk:    { label: "4000er",      color: "#2563eb" },
+  threek:   { label: "3000er",      color: "#16a34a" },
+  special:  { label: "Special",     color: "#c8a020" },
+  wishlist: { label: "Want to go",  color: "#dc2626" }
+};
+const PIN_KINDS = Object.keys(POI_KINDS);
+
+function normalizePinsTab(raw) {
+  const out = {};
+  for (const k of PIN_KINDS) out[k] = (raw && raw[k]) || [];
+  return out;
+}
+function defaultPins() {
+  return { world: normalizePinsTab(null), switzerland: normalizePinsTab(null) };
+}
+function normalizePinsData(raw) {
+  return { world: normalizePinsTab(raw && raw.world), switzerland: normalizePinsTab(raw && raw.switzerland) };
+}
+let pins = defaultPins();
+let pinsLayerEl;
+let currentPoiKind = "fourk";
+
+function pinSVG(color) {
+  return `<svg width="26" height="34" viewBox="0 0 26 34" xmlns="http://www.w3.org/2000/svg">
+    <path d="M13 0C5.8 0 0 5.7 0 12.8 0 22 13 34 13 34s13-12 13-21.2C26 5.7 20.2 0 13 0z" fill="${color}" stroke="rgba(0,0,0,0.35)" stroke-width="1"/>
+    <circle cx="13" cy="12.5" r="5" fill="rgba(255,255,255,0.9)"/>
+  </svg>`;
+}
+const PIN_SVG = {};
+PIN_KINDS.forEach(k => PIN_SVG[k] = pinSVG(POI_KINDS[k].color));
+
+// Redrawn from scratch each time (like redrawScratch) — cheap given the small
+// number of pins, and avoids tracking per-pin DOM elements across pan/zoom.
+function renderPins() {
+  if (!pinsLayerEl) return;
+  pinsLayerEl.innerHTML = "";
+  const map = activeMap();
+  for (const kind of PIN_KINDS) {
+    pins[currentTab][kind].forEach(([lat, lng]) => {
+      const px = map.latLngToContainerPoint([lat, lng]);
+      const div = document.createElement("div");
+      div.className = "pin-icon";
+      div.style.left = (px.x - 13) + "px";
+      div.style.top = (px.y - 34) + "px";
+      div.innerHTML = PIN_SVG[kind];
+      pinsLayerEl.appendChild(div);
+    });
+  }
+}
+
+// Pin icons are anchored at their bottom tip (26x34) — hit-test the actual
+// rendered box, with a small padding margin.
+const PIN_HIT_PAD_PX = 4;
+
+function findPinAt(px) {
+  for (const kind of PIN_KINDS) {
+    const arr = pins[currentTab][kind];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const tip = activeMap().latLngToContainerPoint(arr[i]);
+      if (px.x >= tip.x - 13 - PIN_HIT_PAD_PX && px.x <= tip.x + 13 + PIN_HIT_PAD_PX &&
+          px.y >= tip.y - 34 - PIN_HIT_PAD_PX && px.y <= tip.y + PIN_HIT_PAD_PX) {
+        return { kind, index: i };
+      }
+    }
+  }
+  return null;
+}
+
+function handlePinClick(latlng) {
+  const px = activeMap().latLngToContainerPoint(latlng);
+  const hit = findPinAt(px);
+  if (hit) deletePinAt(hit.kind, hit.index);
+  else placePin(latlng);
+}
+
+function placePin(latlng) {
+  const kind = currentPoiKind;
+  pins[currentTab][kind].push([latlng.lat, latlng.lng]);
+  renderPins();
+  saveState();
+}
+
+function deletePinAt(kind, index) {
+  pins[currentTab][kind].splice(index, 1);
+  renderPins();
+  saveState();
+}
+
 let currentTab = "switzerland";
 let isScratching = false;
 let lastLatLng = null;
@@ -351,9 +483,11 @@ function hideMapLoading() {
 // Safety net in case auth never resolves for some reason
 setTimeout(hideMapLoading, 8000);
 
+pinsLayerEl = document.getElementById("pins-layer");
 initWorldMap([]);
 initChMap([]);
 loadStateLocal();
+renderPins();
 switchTab('switzerland');
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -405,6 +539,7 @@ sb.auth.onAuthStateChange((event, session) => {
     isLoggedIn = false;
     document.body.classList.add("logged-out");
     scratchedPoints = { world: [], switzerland: [] };
+    pins = defaultPins();
     rebuildGrids();
     redrawScratch();
     authForm.style.display = "block";
@@ -578,6 +713,7 @@ function redrawScratch() {
   }
 
   ctx.globalCompositeOperation = "source-over";
+  renderPins();
 }
 
 function getBrushPixels() {
@@ -634,6 +770,10 @@ function interpolate(from, to) {
 }
 
 function onMouseDown(e) {
+  if (currentMode === "poi") {
+    handlePinClick(eventLatLng(e));
+    return;
+  }
   isScratching = true;
   lastLatLng = eventLatLng(e);
   scratchAt(lastLatLng);
@@ -690,6 +830,11 @@ function onTouchStart(e) {
   e.preventDefault();
   if (e.touches.length === 1) {
     touchGesture = null;
+    if (currentMode === "poi") {
+      isScratching = false;
+      handlePinClick(eventLatLng(e.touches[0]));
+      return;
+    }
     isScratching = true;
     lastLatLng = eventLatLng(e.touches[0]);
     scratchAt(lastLatLng);
@@ -735,7 +880,15 @@ function setMode(mode) {
   currentMode = mode;
   document.getElementById("btn-scratch").classList.toggle("active", mode === "scratch");
   document.getElementById("btn-cover").classList.toggle("active", mode === "cover");
+  document.getElementById("btn-poi").classList.toggle("active", mode === "poi");
+  document.getElementById("poi-kinds").style.display = mode === "poi" ? "grid" : "none";
   updateInputGating();
+}
+
+function setPoiKind(kind) {
+  currentPoiKind = kind;
+  PIN_KINDS.forEach(k => document.getElementById("kind-" + k).classList.toggle("active", k === kind));
+  setMode("poi");
 }
 
 // ── Data helpers ──────────────────────────────────────────────────────────────
@@ -810,7 +963,7 @@ function handleImport(e) {
 
 function saveStateLocal() {
   try {
-    localStorage.setItem("scratchMap_points", JSON.stringify(scratchedPoints));
+    localStorage.setItem("scratchMap_points", JSON.stringify({ ...scratchedPoints, pins }));
   } catch(e) {}
 }
 
@@ -820,6 +973,7 @@ function loadStateLocal() {
     if (saved) {
       const parsed = JSON.parse(saved);
       scratchedPoints = { world: parsed.world || [], switzerland: parsed.switzerland || [] };
+      pins = normalizePinsData(parsed.pins);
     }
   } catch(e) {}
   rebuildGrids();
@@ -866,7 +1020,7 @@ async function performSave() {
   setSaveStatus("saving");
   const { error } = await sb.from("scratches").upsert({
     user_id: currentUserId,
-    data: scratchedPoints,
+    data: { ...scratchedPoints, pins },
     updated_at: new Date().toISOString()
   });
   isSaving = false;
@@ -894,8 +1048,10 @@ async function loadRemoteState() {
     .maybeSingle();
   if (!error && data && data.data) {
     scratchedPoints = { world: data.data.world || [], switzerland: data.data.switzerland || [] };
+    pins = normalizePinsData(data.data.pins);
   } else {
     scratchedPoints = { world: [], switzerland: [] };
+    pins = defaultPins();
   }
   rebuildGrids();
   saveStateLocal();
