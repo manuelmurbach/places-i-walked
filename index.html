@@ -22,6 +22,10 @@
     text-decoration: none;
   }
   .locate-btn:hover { background: #f4f4f4; }
+  .locate-btn.active { background: #16a34a; color: #fff; }
+  .locate-btn.active:hover { background: #15803d; }
+  .locate-btn.disabled { opacity: 0.4; pointer-events: none; }
+  body.logged-out .pan-toggle-btn { opacity: 0.5; pointer-events: none; }
 
   /* Scratch canvas and event capture — siblings of the map views, cover same area */
   #scratch-canvas {
@@ -69,7 +73,7 @@
 
   /* Side panel — permanent sidebar like "visible-from", light card + green accent */
   #side-menu {
-    width: 260px; min-width: 260px;
+    width: 220px; min-width: 220px;
     background: #fff; color: #111; border-left: 1px solid #d1d5db;
     display: flex; flex-direction: column; padding: 16px 14px; gap: 16px;
     overflow-y: auto; font-size: 13px;
@@ -134,6 +138,7 @@
   .top-btn.danger { background: #dc2626; }
   .top-btn.danger:hover { background: #b91c1c; }
   .top-btn.small { padding: 5px; font-size: 11px; font-weight: 500; }
+  .top-btn:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
 
   #data-buttons { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
 
@@ -169,11 +174,11 @@
   #menu-toggle-btn:hover { box-shadow: -2px 2px 11px rgba(0,0,0,0.38); }
   #menu-toggle-btn svg { width: 11px; height: 11px; color: #fff; transition: transform 0.25s ease; }
   #menu-toggle-btn.open svg { transform: rotate(180deg); }
-  #menu-toggle-btn.open { right: 260px; }
+  #menu-toggle-btn.open { right: 220px; }
   @media (max-width: 700px) {
     #menu-toggle-btn { display: flex; }
     #side-menu {
-      position: fixed; top: 0; right: 0; height: 100%; width: min(260px, 85vw); min-width: 0;
+      position: fixed; top: 0; right: 0; height: 100%; width: min(220px, 85vw); min-width: 0;
       z-index: 1500; box-shadow: -2px 0 14px rgba(0,0,0,0.3);
       transform: translateX(100%); transition: transform 0.25s ease;
     }
@@ -291,6 +296,7 @@
     <div class="menu-label">Data</div>
     <p class="hint" id="save-status">Changes are saved automatically (10s).</p>
     <button class="top-btn" onclick="saveNow()">Save now</button>
+    <button class="top-btn" id="btn-undo" onclick="undo()" disabled>&#8630; Undo last change</button>
     <div id="data-buttons">
       <button class="top-btn danger small" onclick="resetScratch()">&#8635; Reset Map</button>
       <button class="top-btn small" onclick="exportOverlay()">&#8593; Export backup</button>
@@ -453,21 +459,72 @@ function handlePinClick(latlng) {
 
 function placePin(latlng) {
   const kind = currentPoiKind;
+  pushUndoSnapshot();
   pins[currentTab][kind].push([latlng.lat, latlng.lng]);
   renderPins();
   saveState();
 }
 
 function deletePinAt(kind, index) {
+  pushUndoSnapshot();
   pins[currentTab][kind].splice(index, 1);
   renderPins();
   saveState();
+}
+
+// ── Undo ────────────────────────────────────────────────────────────────────
+// Snapshot-based: cheap given the small data sizes involved, and simpler than
+// tracking per-action diffs. Capped so it can't grow unbounded in a long session.
+
+const UNDO_MAX = 20;
+let undoStack = [];
+
+function clonePoints(arr) { return arr.map(p => p.slice()); }
+function clonePinsTab(tab) {
+  const out = {};
+  for (const k of PIN_KINDS) out[k] = clonePoints(pins[tab][k]);
+  return out;
+}
+function snapshotState() {
+  return {
+    scratchedPoints: { world: clonePoints(scratchedPoints.world), switzerland: clonePoints(scratchedPoints.switzerland) },
+    pins: { world: clonePinsTab("world"), switzerland: clonePinsTab("switzerland") }
+  };
+}
+function pushUndoSnapshot() {
+  undoStack.push(snapshotState());
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  updateUndoButton();
+}
+function clearUndoStack() {
+  undoStack = [];
+  updateUndoButton();
+}
+function updateUndoButton() {
+  const empty = undoStack.length === 0;
+  const btn = document.getElementById("btn-undo");
+  if (btn) btn.disabled = empty;
+  undoMapButtons.forEach(b => b.classList.toggle("disabled", empty));
+}
+function undo() {
+  if (undoStack.length === 0) return;
+  const prev = undoStack.pop();
+  scratchedPoints = prev.scratchedPoints;
+  pins = prev.pins;
+  rebuildGrids();
+  redrawScratch();
+  saveState();
+  updateUndoButton();
 }
 
 let currentTab = "switzerland";
 let isScratching = false;
 let lastLatLng = null;
 let currentMode = "scratch";
+let isPanning = false;
+let lastPanPoint = null;
+let panToggleButtons = [];
+let undoMapButtons = [];
 let isLoggedIn = false;
 document.body.classList.add("logged-out");
 
@@ -540,6 +597,7 @@ sb.auth.onAuthStateChange((event, session) => {
     document.body.classList.add("logged-out");
     scratchedPoints = { world: [], switzerland: [] };
     pins = defaultPins();
+    clearUndoStack();
     rebuildGrids();
     redrawScratch();
     authForm.style.display = "block";
@@ -568,6 +626,8 @@ function initWorldMap(points) {
 
   worldMap.on("moveend zoomend", redrawScratch);
   addLocateControl(worldMap);
+  addPanToggleControl(worldMap);
+  addUndoControl(worldMap);
 }
 
 // ── Switzerland Map ───────────────────────────────────────────────────────────
@@ -625,8 +685,55 @@ function initChMap(points) {
 
   chMap.on("moveend zoomend", redrawScratch);
   addLocateControl(chMap);
+  addPanToggleControl(chMap);
+  addUndoControl(chMap);
 
   new ResizeObserver(() => resizeAndRedraw()).observe(document.getElementById("map-container"));
+}
+
+// ── Pan mode toggle ───────────────────────────────────────────────────────────
+// Lives next to zoom/locate controls (not the side menu) so it's reachable on
+// mobile without opening the drawer — drag-to-scratch makes casual one-finger
+// panning too easy to trigger by accident.
+
+function addPanToggleControl(map) {
+  const control = L.control({ position: "topleft" });
+  control.onAdd = function() {
+    const container = L.DomUtil.create("div", "leaflet-bar leaflet-control");
+    const link = L.DomUtil.create("a", "locate-btn pan-toggle-btn", container);
+    link.href = "#";
+    link.title = "Pan mode (drag to move the map without scratching)";
+    link.innerHTML = "&#9995;";
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(link, "click", L.DomEvent.stop).on(link, "click", togglePanMode);
+    panToggleButtons.push(link);
+    return container;
+  };
+  control.addTo(map);
+}
+
+function togglePanMode() {
+  setMode(currentMode === "pan" ? "scratch" : "pan");
+}
+
+// ── Undo control (map) ───────────────────────────────────────────────────────
+// Sits right below the pan toggle, so it's reachable on mobile too.
+
+function addUndoControl(map) {
+  const control = L.control({ position: "topleft" });
+  control.onAdd = function() {
+    const container = L.DomUtil.create("div", "leaflet-bar leaflet-control");
+    const link = L.DomUtil.create("a", "locate-btn undo-btn", container);
+    link.href = "#";
+    link.title = "Undo last change";
+    link.innerHTML = "&#8630;";
+    if (undoStack.length === 0) link.classList.add("disabled");
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(link, "click", L.DomEvent.stop).on(link, "click", undo);
+    undoMapButtons.push(link);
+    return container;
+  };
+  control.addTo(map);
 }
 
 // ── Locate me ─────────────────────────────────────────────────────────────────
@@ -774,17 +881,29 @@ function onMouseDown(e) {
     handlePinClick(eventLatLng(e));
     return;
   }
+  if (currentMode === "pan") {
+    isPanning = true;
+    lastPanPoint = { x: e.clientX, y: e.clientY };
+    return;
+  }
   isScratching = true;
   lastLatLng = eventLatLng(e);
+  pushUndoSnapshot();
   scratchAt(lastLatLng);
 }
 function onMouseMove(e) {
+  if (isPanning) {
+    activeMap().panBy([lastPanPoint.x - e.clientX, lastPanPoint.y - e.clientY], { animate: false });
+    lastPanPoint = { x: e.clientX, y: e.clientY };
+    return;
+  }
   if (!isScratching) return;
   const curr = eventLatLng(e);
   interpolate(lastLatLng, curr);
   lastLatLng = curr;
 }
 function onMouseUp() {
+  if (isPanning) { isPanning = false; return; }
   if (!isScratching) return;
   isScratching = false;
   saveState();
@@ -835,17 +954,28 @@ function onTouchStart(e) {
       handlePinClick(eventLatLng(e.touches[0]));
       return;
     }
+    if (currentMode === "pan") {
+      isPanning = true;
+      lastPanPoint = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      return;
+    }
     isScratching = true;
     lastLatLng = eventLatLng(e.touches[0]);
+    pushUndoSnapshot();
     scratchAt(lastLatLng);
   } else if (e.touches.length === 2) {
     isScratching = false;
+    isPanning = false;
     touchGesture = touchGeometry(e.touches);
   }
 }
 function onTouchMove(e) {
   e.preventDefault();
-  if (e.touches.length === 1 && isScratching) {
+  if (e.touches.length === 1 && isPanning) {
+    const t = e.touches[0];
+    activeMap().panBy([lastPanPoint.x - t.clientX, lastPanPoint.y - t.clientY], { animate: false });
+    lastPanPoint = { x: t.clientX, y: t.clientY };
+  } else if (e.touches.length === 1 && isScratching) {
     const curr = eventLatLng(e.touches[0]);
     interpolate(lastLatLng, curr);
     lastLatLng = curr;
@@ -871,6 +1001,7 @@ function onTouchEnd(e) {
     // Dropped from two fingers to one — require a fresh lift before scratching again.
     touchGesture = null;
     isScratching = false;
+    isPanning = false;
   }
 }
 
@@ -882,6 +1013,7 @@ function setMode(mode) {
   document.getElementById("btn-cover").classList.toggle("active", mode === "cover");
   document.getElementById("btn-poi").classList.toggle("active", mode === "poi");
   document.getElementById("poi-kinds").style.display = mode === "poi" ? "grid" : "none";
+  panToggleButtons.forEach(btn => btn.classList.toggle("active", mode === "pan"));
   updateInputGating();
 }
 
@@ -951,6 +1083,7 @@ function handleImport(e) {
   reader.onload = (ev) => {
     try {
       applyOverlayData(JSON.parse(ev.target.result));
+      clearUndoStack();
       saveState();
       redrawScratch();
     } catch(err) { alert("Invalid overlay file."); }
@@ -1053,6 +1186,7 @@ async function loadRemoteState() {
     scratchedPoints = { world: [], switzerland: [] };
     pins = defaultPins();
   }
+  clearUndoStack();
   rebuildGrids();
   saveStateLocal();
   redrawScratch();
@@ -1081,8 +1215,9 @@ function showConfirm(title, message) {
 }
 
 async function resetScratch() {
-  const ok = await showConfirm("Reset map?", "This clears all scratched areas for this tab and can't be undone.");
+  const ok = await showConfirm("Reset map?", "This clears all scratched areas for this tab. Use Undo right after if this was a mistake.");
   if (!ok) return;
+  pushUndoSnapshot();
   scratchedPoints[currentTab] = [];
   saveState();
   redrawScratch();
